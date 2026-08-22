@@ -1,7 +1,13 @@
-"use client";
+  "use client";
 
 import { useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
+import type {
+  TimetableEntry,
+  TimetableCourse,
+} from "./timetable-types";
+import TimetableForm from "./TimetableForm";
+import TimetableGrid from "./TimetableGrid";
 
 type Semester = {
   id: string;
@@ -24,6 +30,13 @@ type Absence = {
   course_id: string;
 };
 
+type TimetableDaySchedule = {
+  day: number;
+  startTime: string;
+  endTime: string;
+  venue: string;
+};
+
 export default function SemesterPage() {
   const supabase = createClient();
 
@@ -41,6 +54,42 @@ export default function SemesterPage() {
 
   const [selectedAbsences, setSelectedAbsences] =
     useState<Absence[]>([]);
+
+  const [timetableEntries, setTimetableEntries] =
+    useState<TimetableEntry[]>([]);
+
+  const [timetableCourses, setTimetableCourses] =
+    useState<TimetableCourse[]>([]);
+
+  const [timetableLoading, setTimetableLoading] =
+    useState(false);
+
+const [showTimetableForm, setShowTimetableForm] =
+  useState(false);
+
+const [editingTimetableEntry, setEditingTimetableEntry] =
+  useState<TimetableEntry | null>(null);
+
+const [timetableCourseId, setTimetableCourseId] =
+  useState("");
+
+const [timetableDays, setTimetableDays] =
+  useState<number[]>([]);
+
+const [timetableStartTime, setTimetableStartTime] =
+  useState("");
+
+const [timetableEndTime, setTimetableEndTime] =
+  useState("");
+
+const [timetableVenue, setTimetableVenue] =
+  useState("");
+
+const [timetableNotes, setTimetableNotes] =
+  useState("");
+
+const [timetableSaving, setTimetableSaving] =
+  useState(false);
 
   const [name, setName] = useState("");
   const [startDate, setStartDate] = useState("");
@@ -105,6 +154,438 @@ export default function SemesterPage() {
       ) ?? null;
 
     setSemester(activeSemester);
+
+    if (activeSemester) {
+      await loadTimetable(activeSemester.id);
+
+      const {
+        data: activeCourseData,
+        error: activeCourseError,
+      } = await supabase
+        .from("courses")
+        .select(
+          "id, name, code, instructor, max_absences"
+        )
+        .eq("user_id", user.id)
+        .eq("semester_id", activeSemester.id)
+        .order("name");
+
+      if (activeCourseError) {
+        setMessage(
+          `Failed to load current semester courses: ${activeCourseError.message}`
+        );
+        setSelectedCourses([]);
+      } else {
+        setSelectedCourses(activeCourseData ?? []);
+      }
+    } else {
+      setTimetableEntries([]);
+      setTimetableCourses([]);
+      setSelectedCourses([]);
+    }
+  }
+
+  // =========================================================
+  // LOAD TIMETABLE FOR SEMESTER
+  // =========================================================
+
+  async function loadTimetable(semesterId: string) {
+    setTimetableLoading(true);
+
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) {
+      setTimetableLoading(false);
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from("timetable_entries")
+      .select(
+        `
+          id,
+          user_id,
+          semester_id,
+          course_id,
+          day_of_week,
+          start_time,
+          end_time,
+          venue,
+          notes,
+          created_at,
+          courses (
+            id,
+            name,
+            code,
+            instructor
+          )
+        `
+      )
+      .eq("user_id", user.id)
+      .eq("semester_id", semesterId)
+      .order("day_of_week")
+      .order("start_time");
+
+    if (error) {
+      setMessage(
+        `Failed to load timetable: ${error.message}`
+      );
+      setTimetableLoading(false);
+      return;
+    }
+
+    const entries: TimetableEntry[] = [];
+    const courses: TimetableCourse[] = [];
+
+    for (const item of data ?? []) {
+      const course = item.courses as
+        | TimetableCourse
+        | TimetableCourse[]
+        | null;
+
+      const normalizedCourse = Array.isArray(course)
+        ? course[0]
+        : course;
+
+      entries.push({
+        id: item.id,
+        user_id: item.user_id,
+        semester_id: item.semester_id,
+        course_id: item.course_id,
+        day_of_week: item.day_of_week,
+        start_time: item.start_time,
+        end_time: item.end_time,
+        venue: item.venue,
+        notes: item.notes,
+        created_at: item.created_at,
+      });
+
+      if (
+        normalizedCourse &&
+        !courses.some(
+          (existing) =>
+            existing.id === normalizedCourse.id
+        )
+      ) {
+        courses.push(normalizedCourse);
+      }
+    }
+
+    setTimetableEntries(entries);
+    setTimetableCourses(courses);
+    setTimetableLoading(false);
+  }
+
+  // =========================================================
+  // TIMETABLE CRUD
+  // =========================================================
+
+  async function addTimetableEntry(
+    semesterId: string,
+    courseId: string,
+    dayOfWeek: number,
+    startTime: string,
+    endTime: string,
+    venue: string,
+    notes: string
+  ) {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) {
+      setMessage("You are not logged in.");
+      return false;
+    }
+
+    if (endTime <= startTime) {
+      setMessage("End time must be later than start time.");
+      return false;
+    }
+
+    const { error } = await supabase
+      .from("timetable_entries")
+      .insert({
+        user_id: user.id,
+        semester_id: semesterId,
+        course_id: courseId,
+        day_of_week: dayOfWeek,
+        start_time: startTime,
+        end_time: endTime,
+        venue: venue.trim() || null,
+        notes: notes.trim() || null,
+      });
+
+    if (error) {
+      setMessage(
+        `Failed to add timetable entry: ${error.message}`
+      );
+      return false;
+    }
+
+    await loadTimetable(semesterId);
+    return true;
+  }
+
+  async function handleAddTimetable(
+    courseId: string,
+    schedules: TimetableDaySchedule[],
+    notes: string
+  ) {
+    if (!semester) {
+      setMessage("No active semester found.");
+      return false;
+    }
+
+    if (schedules.length === 0) {
+      setMessage("Please select at least one day.");
+      return false;
+    }
+
+    setTimetableSaving(true);
+    setMessage("");
+
+    try {
+      for (const schedule of schedules) {
+        const success = await addTimetableEntry(
+          semester.id,
+          courseId,
+          schedule.day,
+          schedule.startTime,
+          schedule.endTime,
+          schedule.venue,
+          notes
+        );
+
+        if (!success) {
+          return false;
+        }
+      }
+
+      setMessage(
+        "Class added to timetable successfully."
+      );
+      return true;
+    } finally {
+      setTimetableSaving(false);
+    }
+  }
+
+  function getDayName(day: number) {
+    const names: Record<number, string> = {
+      1: "Monday",
+      2: "Tuesday",
+      3: "Wednesday",
+      4: "Thursday",
+      5: "Friday",
+      6: "Saturday",
+    };
+
+    return names[day] ?? "selected day";
+  }
+
+  function handleEditTimetable(
+    entry: TimetableEntry
+  ) {
+    setEditingTimetableEntry(entry);
+    setShowTimetableForm(true);
+    setMessage("");
+  }
+
+  function handleCancelTimetableForm() {
+    setShowTimetableForm(false);
+    setEditingTimetableEntry(null);
+  }
+
+  async function handleTimetableSubmit(
+    courseId: string,
+    schedules: TimetableDaySchedule[],
+    notes: string
+  ) {
+    if (!semester) {
+      setMessage("No active semester found.");
+      return false;
+    }
+
+    if (schedules.length === 0) {
+      setMessage("Please select at least one day.");
+      return false;
+    }
+
+    setTimetableSaving(true);
+    setMessage("");
+
+    try {
+      if (editingTimetableEntry) {
+        const firstSchedule = schedules[0];
+
+        const updated = await updateTimetableEntry(
+          editingTimetableEntry.id,
+          semester.id,
+          courseId,
+          firstSchedule.day,
+          firstSchedule.startTime,
+          firstSchedule.endTime,
+          firstSchedule.venue,
+          notes
+        );
+
+        if (!updated) {
+          return false;
+        }
+
+        for (const schedule of schedules.slice(1)) {
+          const success = await addTimetableEntry(
+            semester.id,
+            courseId,
+            schedule.day,
+            schedule.startTime,
+            schedule.endTime,
+            schedule.venue,
+            notes
+          );
+
+          if (!success) {
+            return false;
+          }
+        }
+
+        setMessage(
+          "Timetable class updated successfully."
+        );
+        return true;
+      }
+
+      return await handleAddTimetable(
+        courseId,
+        schedules,
+        notes
+      );
+    } finally {
+      setTimetableSaving(false);
+    }
+  }
+
+  async function handleDeleteTimetable(
+    entry: TimetableEntry
+  ) {
+    if (!semester) {
+      setMessage("No active semester found.");
+      return;
+    }
+
+    const course = timetableCourses.find(
+      (item) => item.id === entry.course_id
+    );
+
+    const confirmed = window.confirm(
+      `Delete "${course?.name ?? "this class"}" from the ${getDayName(
+        entry.day_of_week
+      )} timetable?\n\nThis cannot be undone.`
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setTimetableSaving(true);
+    setMessage("");
+
+    try {
+      const success = await deleteTimetableEntry(
+        entry.id,
+        semester.id
+      );
+
+      if (success) {
+        setMessage(
+          "Timetable class deleted successfully."
+        );
+      }
+    } finally {
+      setTimetableSaving(false);
+    }
+  }
+
+  async function updateTimetableEntry(
+    entryId: string,
+    semesterId: string,
+    courseId: string,
+    dayOfWeek: number,
+    startTime: string,
+    endTime: string,
+    venue: string,
+    notes: string
+  ) {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) {
+      setMessage("You are not logged in.");
+      return false;
+    }
+
+    if (endTime <= startTime) {
+      setMessage("End time must be later than start time.");
+      return false;
+    }
+
+    const { error } = await supabase
+      .from("timetable_entries")
+      .update({
+        semester_id: semesterId,
+        course_id: courseId,
+        day_of_week: dayOfWeek,
+        start_time: startTime,
+        end_time: endTime,
+        venue: venue.trim() || null,
+        notes: notes.trim() || null,
+      })
+      .eq("id", entryId)
+      .eq("user_id", user.id);
+
+    if (error) {
+      setMessage(
+        `Failed to update timetable entry: ${error.message}`
+      );
+      return false;
+    }
+
+    await loadTimetable(semesterId);
+    return true;
+  }
+
+  async function deleteTimetableEntry(
+    entryId: string,
+    semesterId: string
+  ) {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) {
+      setMessage("You are not logged in.");
+      return false;
+    }
+
+    const { error } = await supabase
+      .from("timetable_entries")
+      .delete()
+      .eq("id", entryId)
+      .eq("user_id", user.id);
+
+    if (error) {
+      setMessage(
+        `Failed to delete timetable entry: ${error.message}`
+      );
+      return false;
+    }
+
+    await loadTimetable(semesterId);
+    return true;
   }
 
   // =========================================================
@@ -1239,6 +1720,72 @@ export default function SemesterPage() {
 
                 </div>
 
+                {/* =================================================
+                    CURRENT SEMESTER TIMETABLE
+                ================================================= */}
+
+                <div className="mt-8 border-t border-slate-200 pt-8 dark:border-slate-700">
+
+                  <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+
+                    <div>
+                      <h3 className="text-2xl font-semibold text-slate-900 dark:text-slate-100">
+                        Current Semester Timetable
+                      </h3>
+
+                      <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+                        Manage your weekly class schedule.
+                      </p>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (showTimetableForm) {
+                          handleCancelTimetableForm();
+                        } else {
+                          setEditingTimetableEntry(null);
+                          setShowTimetableForm(true);
+                          setMessage("");
+                        }
+                      }}
+                      className="rounded-xl bg-slate-900 px-5 py-3 font-medium text-white transition hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-white"
+                    >
+                      {showTimetableForm
+                        ? "Close"
+                        : "+ Add Class"}
+                    </button>
+
+                  </div>
+
+                  {showTimetableForm && (
+                    <TimetableForm
+                      courses={selectedCourses}
+                      initialEntry={editingTimetableEntry}
+                      onSubmit={handleTimetableSubmit}
+                      onCancel={handleCancelTimetableForm}
+                    />
+                  )}
+
+                  <div className="mt-6">
+                    {timetableLoading ? (
+                      <div className="rounded-xl bg-slate-50 p-6 text-center dark:bg-slate-800">
+                        <p className="text-sm text-slate-500 dark:text-slate-400">
+                          Loading timetable...
+                        </p>
+                      </div>
+                    ) : (
+                      <TimetableGrid
+                        entries={timetableEntries}
+                        courses={timetableCourses}
+                        onEdit={handleEditTimetable}
+                        onDelete={handleDeleteTimetable}
+                      />
+                    )}
+                  </div>
+
+                </div>
+
               </div>
             ) : (
               /* NO ACTIVE SEMESTER */
@@ -1399,3 +1946,5 @@ export default function SemesterPage() {
     </main>
   );
 }
+
+
